@@ -12,6 +12,8 @@ lazy_static = "0.2"
 libc = "0.2.12"
 rand = "0.3"
 serde = "0.8"
+mio = {git="https://github.com/carllerche/mio"}
+slab = {git="https://github.com/carllerche/slab"}
 
 [target.'cfg(any(target_os = "windows", target_os = "android"))'.dependencies]
 uuid = {version = "0.3", features = ["v4"]}

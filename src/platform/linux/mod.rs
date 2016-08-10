@@ -8,21 +8,25 @@
 // except according to those terms.
 
 use bincode::serde::DeserializeError;
-use libc::{self, MAP_FAILED, MAP_SHARED, POLLIN, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
+use libc::{self, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
 use libc::{SO_LINGER, S_IFMT, S_IFSOCK, c_char, c_int, c_short, c_ushort, c_void, getsockopt};
-use libc::{iovec, mkstemp, mode_t, msghdr, nfds_t, off_t, poll, pollfd, recvmsg, sendmsg};
+use libc::{iovec, mkstemp, mode_t, msghdr, off_t, recvmsg, sendmsg};
 use libc::{setsockopt, size_t, sockaddr, sockaddr_un, socketpair, socklen_t};
 use std::cmp;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Debug, Formatter};
 use std::io::Error;
 use std::mem;
 use std::ops::Deref;
+use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::thread;
+use mio::{Poll, Token, Events, EventSet, PollOpt, Io};
+use std::hash::BuildHasherDefault;
+use fnv::FnvHasher;
 
 const MAX_FDS_IN_CMSG: u32 = 64;
 
@@ -386,70 +390,69 @@ impl OsIpcChannel {
 }
 
 pub struct OsIpcReceiverSet {
-    pollfds: Vec<pollfd>,
-}
-
-impl Drop for OsIpcReceiverSet {
-    fn drop(&mut self) {
-        unsafe {
-            for pollfd in self.pollfds.iter() {
-                let result = libc::close(pollfd.fd);
-                assert!(thread::panicking() || result == 0);
-            }
-        }
-    }
+    poll: Poll,
+    pollfds: HashMap<Token, Io, BuildHasherDefault<FnvHasher>>,
+    events: Events
 }
 
 impl OsIpcReceiverSet {
     pub fn new() -> Result<OsIpcReceiverSet,UnixError> {
+        let fnv = BuildHasherDefault::<FnvHasher>::default();
         Ok(OsIpcReceiverSet {
-            pollfds: Vec::new(),
+            poll: Poll::new().expect("Could not create a new receiver"),
+            pollfds: HashMap::with_hasher(fnv),
+            events: Events::new()
         })
     }
 
     pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<i64,UnixError> {
         let fd = receiver.consume_fd();
-        self.pollfds.push(pollfd {
-            fd: fd,
-            events: POLLIN,
-            revents: 0,
-        });
+        let io = Io::from_raw_fd(fd);
+        let fd_token = Token(fd as usize);
+        self.poll.register(&io, fd_token, EventSet::readable(), PollOpt::level())
+            .expect(&format!("Could not register: {:?}", fd));
+        self.pollfds.insert(fd_token, io);
         Ok(fd as i64)
     }
 
     pub fn select(&mut self) -> Result<Vec<OsIpcSelectionResult>,UnixError> {
         let mut selection_results = Vec::new();
-        let result = unsafe {
-            poll(self.pollfds.as_mut_ptr(), self.pollfds.len() as nfds_t, -1)
+        let sz = match self.poll.poll(&mut self.events, None) {
+            Ok(sz) if sz > 0 => sz,
+            _ => { return Err(UnixError::last()); }
         };
-        if result <= 0 {
-            return Err(UnixError::last())
-        }
 
         let mut hangups = HashSet::new();
-        for pollfd in self.pollfds.iter_mut() {
-            if (pollfd.revents & POLLIN) != 0 {
-                match recv(pollfd.fd, BlockingMode::Blocking) {
-                    Ok((data, channels, shared_memory_regions)) => {
-                        selection_results.push(OsIpcSelectionResult::DataReceived(
-                                pollfd.fd as i64,
-                                data,
-                                channels,
-                                shared_memory_regions));
+        for i in 0..sz {
+            let evt = self.events.get(i).unwrap();
+            let evt_token = evt.token();
+            match (evt.kind().is_readable(), self.pollfds.get(&evt_token)) {
+                (true, Some(fd)) => {
+                    let fd = fd.as_raw_fd();
+                    match recv(fd, BlockingMode::Blocking) {
+                        Ok((data, channels, shared_memory_regions)) => {
+                            selection_results.push(OsIpcSelectionResult::DataReceived(
+                                    fd as i64,
+                                    data,
+                                    channels,
+                                    shared_memory_regions));
+                        }
+                        Err(err) if err.channel_is_closed() => {
+                            hangups.insert(evt_token);
+                            selection_results.push(OsIpcSelectionResult::ChannelClosed(
+                                        fd as i64))
+                        }
+                        Err(err) => return Err(err),
                     }
-                    Err(err) if err.channel_is_closed() => {
-                        hangups.insert(pollfd.fd);
-                        selection_results.push(OsIpcSelectionResult::ChannelClosed(
-                                    pollfd.fd as i64))
-                    }
-                    Err(err) => return Err(err),
-                }
-                pollfd.revents = pollfd.revents & !POLLIN
+                },
+                _ => {},
             }
         }
 
         if !hangups.is_empty() {
-            self.pollfds.retain(|pollfd| !hangups.contains(&pollfd.fd));
+            for hangup in hangups.iter() {
+                self.pollfds.remove(hangup).unwrap();
+            }
         }
 
         Ok(selection_results)
