@@ -170,3 +170,106 @@ fn size_22_4m(b: &mut test::Bencher) {
 fn size_23_8m(b: &mut test::Bencher) {
     bench_size(b, 8 * 1024 * 1024);
 }
+
+#[cfg(test)]
+mod receiver_set {
+    use ipc_channel::ipc::{self, IpcReceiverSet};
+    use test;
+
+    fn gen_select_test(b: &mut test::Bencher, to_send: usize, n: usize) -> () {
+        let mut active = Vec::with_capacity(to_send);
+        let mut dormant = Vec::with_capacity(n - to_send);
+        let mut rx_set = IpcReceiverSet::new().unwrap();
+        let mut i = 0;
+        while i < to_send {
+            let (tx, rx) = ipc::channel().unwrap();
+            rx_set.add(rx).unwrap();
+            active.push(tx);
+            i += 1;
+        }
+        while i < n {
+            let (tx, rx) = ipc::channel::<()>().unwrap();
+            rx_set.add(rx).unwrap();
+            dormant.push(tx);
+            i += 1;
+        }
+        b.iter(|| {
+            for tx in active.iter() {
+                tx.send(()).unwrap();
+            }
+            let mut received = 0;
+            while received < to_send {
+                for result in rx_set.select().unwrap().into_iter() {
+                    let (_, _) = result.unwrap();
+                    received += 1;
+                }
+            }
+        });
+    }
+
+    fn add_n_rxs(rx_set: &mut IpcReceiverSet, n: usize) -> () {
+        for _ in 0..n {
+            let (_, rx) = ipc::channel::<()>().unwrap();
+            rx_set.add(rx).unwrap();
+        }
+    }
+
+    #[bench]
+    fn bench_one_percent_100(b: &mut test::Bencher) -> () {
+        gen_select_test(b, 1, 100);
+    }
+
+    #[bench]
+    fn bench_one_hundred_percent_100(b: &mut test::Bencher) -> () {
+        gen_select_test(b, 100, 100);
+    }
+
+    #[bench]
+    fn bench_twenty_percent_10(b: &mut test::Bencher) -> () {
+        gen_select_test(b, 2, 10);
+    }
+
+    #[bench]
+    fn bench_thirty_percent_10(b: &mut test::Bencher) -> () {
+        gen_select_test(b, 3, 10);
+    }
+
+    #[bench]
+    fn bench_twenty_percent_5(b: &mut test::Bencher) -> () {
+        gen_select_test(b, 1, 5);
+    }
+
+    #[bench]
+    fn bench_create_and_destroy_10(b: &mut test::Bencher) -> () {
+        b.iter(|| {
+            let mut rx_set = IpcReceiverSet::new().unwrap();
+            add_n_rxs(&mut rx_set, 10);
+        });
+    }
+
+    #[bench]
+    fn bench_create_and_destroy_5(b: &mut test::Bencher) -> () {
+        b.iter(|| {
+            let mut rx_set = IpcReceiverSet::new().unwrap();
+            add_n_rxs(&mut rx_set, 3);
+            rx_set.select().unwrap();
+        });
+    }
+
+    #[bench]
+    fn bench_manipulation(b: &mut test::Bencher) -> () {
+        b.iter(|| {
+            let mut rx_set = IpcReceiverSet::new().unwrap();
+            {
+                {
+                    let (_, rx) = ipc::channel::<()>().unwrap();
+                    rx_set.add(rx).unwrap();
+                }
+                rx_set.select().unwrap();
+                let (tx, rx) = ipc::channel::<()>().unwrap();
+                rx_set.add(rx).unwrap();
+                tx.send(()).unwrap();
+            }
+        });
+    }
+}
