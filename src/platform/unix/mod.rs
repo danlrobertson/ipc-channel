@@ -9,9 +9,10 @@
 
 use fnv::FnvHasher;
 use bincode::serde::DeserializeError;
-use libc::{self, MAP_FAILED, MAP_SHARED, POLLIN, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
+use libc::{self, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
 use libc::{SO_LINGER, S_IFMT, S_IFSOCK, c_char, c_int, c_void, getsockopt};
-use libc::{iovec, mkstemp, mode_t, msghdr, nfds_t, off_t, poll, pollfd, recvmsg, sendmsg};
+use libc::{iovec, mkstemp, mode_t, msghdr, off_t, recvmsg, sendmsg};
+use libc::{epoll_wait, epoll_event, epoll_create1, epoll_ctl, EPOLLIN, EPOLL_CTL_ADD, EPOLL_CTL_DEL};
 use libc::{setsockopt, size_t, sockaddr, sockaddr_un, socketpair, socklen_t, sa_family_t};
 use std::cell::Cell;
 use std::cmp;
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use std::thread;
 
 const MAX_FDS_IN_CMSG: u32 = 64;
+const MAX_EVENTS: i32 = 10;
 
 const SCM_RIGHTS: c_int = 0x01;
 
@@ -415,17 +417,19 @@ impl OsIpcChannel {
 
 pub struct OsIpcReceiverSet {
     incrementor: Incrementor,
-    pollfds: Vec<pollfd>,
-    fdids: HashMap<c_int, u64, BuildHasherDefault<FnvHasher>>
+    fdids: HashMap<c_int, u64, BuildHasherDefault<FnvHasher>>,
+    epollfd: c_int,
 }
 
 impl Drop for OsIpcReceiverSet {
     fn drop(&mut self) {
         unsafe {
-            for pollfd in self.pollfds.iter() {
-                let result = libc::close(pollfd.fd);
+            for (fd, _) in self.fdids.iter() {
+                let result = libc::close(*fd);
                 assert!(thread::panicking() || result == 0);
             }
+            let result = libc::close(self.epollfd);
+            assert!(thread::panicking() || result == 0);
         }
     }
 }
@@ -435,60 +439,67 @@ impl OsIpcReceiverSet {
         let fnv = BuildHasherDefault::<FnvHasher>::default();
         Ok(OsIpcReceiverSet {
             incrementor: Incrementor::new(),
-            pollfds: Vec::new(),
-            fdids: HashMap::with_hasher(fnv)
+            fdids: HashMap::with_hasher(fnv),
+            epollfd: unsafe { epoll_create1(0) }
         })
     }
 
     pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<u64,UnixError> {
         let last_index = self.incrementor.increment();
         let fd = receiver.consume_fd();
-        self.pollfds.push(pollfd {
-            fd: fd,
-            events: POLLIN,
-            revents: 0,
-        });
         self.fdids.insert(fd, last_index);
+        let mut ev = epoll_event {
+            events: EPOLLIN as u32,
+            u64: fd as u64
+        };
+        unsafe {
+            epoll_ctl(self.epollfd, EPOLL_CTL_ADD, fd, &mut ev as *mut epoll_event);
+        }
         Ok(last_index)
     }
 
     pub fn select(&mut self) -> Result<Vec<OsIpcSelectionResult>,UnixError> {
         let mut selection_results = Vec::new();
-        let result = unsafe {
-            poll(self.pollfds.as_mut_ptr(), self.pollfds.len() as nfds_t, -1)
+        let events: Vec<epoll_event> = unsafe {
+            let mut events = Vec::with_capacity(MAX_EVENTS as usize);
+            let nfds = epoll_wait(self.epollfd, events.as_mut_ptr(), MAX_EVENTS, -1);
+            if nfds <= 0 {
+                return Err(UnixError::last())
+            }
+            events.set_len(nfds as usize);
+            events
         };
-        if result <= 0 {
-            return Err(UnixError::last())
-        }
 
-        for pollfd in self.pollfds.iter_mut() {
-            if (pollfd.revents & POLLIN) != 0 {
-                match recv(pollfd.fd, BlockingMode::Blocking) {
+        for evt in events.iter() {
+            if (evt.events & EPOLLIN as u32) != 0 {
+                let fd = evt.u64 as c_int;
+                match recv(fd, BlockingMode::Blocking) {
                     Ok((data, channels, shared_memory_regions)) => {
                         selection_results.push(OsIpcSelectionResult::DataReceived(
-                                *self.fdids.get(&pollfd.fd).unwrap(),
+                                *self.fdids.get(&fd).unwrap(),
                                 data,
                                 channels,
                                 shared_memory_regions));
                     }
                     Err(err) if err.channel_is_closed() => {
-                        let id = self.fdids.remove(&pollfd.fd).unwrap();
                         unsafe {
-                            libc::close(pollfd.fd);
+                            // NB: See the BUGS portion of the epoll_ctl man page
+                            // for the perpose of the event variable
+                            libc::close(fd);
+                            let mut event = epoll_event {
+                                events: 0,
+                                u64: 0
+                            };
+                            epoll_ctl(self.epollfd, EPOLL_CTL_DEL, fd,
+                                      &mut event as *mut epoll_event);
                         }
+                        let id = self.fdids.remove(&fd).unwrap();
                         selection_results.push(OsIpcSelectionResult::ChannelClosed(id))
                     }
                     Err(err) => return Err(err),
                 }
-                pollfd.revents = pollfd.revents & !POLLIN
             }
         }
-
-        // File descriptors not in fdids are closed channels, and the descriptor
-        // has been closed. This must be done after we have finished iterating over
-        // the pollfds vec.
-        let fdids = &self.fdids;
-        self.pollfds.retain(|pollfd| fdids.contains_key(&pollfd.fd));
 
         Ok(selection_results)
     }
