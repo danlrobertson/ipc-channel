@@ -22,7 +22,10 @@ extern crate serde;
 extern crate uuid;
 #[cfg(all(not(feature = "force-inprocess"), any(target_os = "linux",
                                                 target_os = "freebsd")))]
-extern crate fnv;
+extern crate mio;
+#[cfg(all(not(feature = "force-inprocess"), any(target_os = "linux",
+                                                target_os = "freebsd")))]
+extern crate slab;
 
 pub mod ipc;
 pub mod platform;
