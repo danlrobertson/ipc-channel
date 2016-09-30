@@ -8,14 +8,16 @@
 // except according to those terms.
 
 use bincode::serde::DeserializeError;
+use fnv::FnvHasher;
 use libc::{self, MAP_FAILED, MAP_SHARED, POLLIN, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
 use libc::{SO_LINGER, S_IFMT, S_IFSOCK, c_char, c_int, c_short, c_ushort, c_void, getsockopt};
 use libc::{iovec, mkstemp, mode_t, msghdr, nfds_t, off_t, poll, pollfd, recvmsg, sendmsg};
 use libc::{setsockopt, size_t, sockaddr, sockaddr_un, socketpair, socklen_t};
 use std::cmp;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Debug, Formatter};
+use std::hash::BuildHasherDefault;
 use std::io::Error;
 use std::mem;
 use std::ops::Deref;
@@ -23,6 +25,7 @@ use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::thread;
+use uuid::Uuid;
 
 const MAX_FDS_IN_CMSG: u32 = 64;
 
@@ -387,6 +390,7 @@ impl OsIpcChannel {
 
 pub struct OsIpcReceiverSet {
     pollfds: Vec<pollfd>,
+    fdids: HashMap<c_int, Uuid, BuildHasherDefault<FnvHasher>>,
 }
 
 impl Drop for OsIpcReceiverSet {
@@ -402,19 +406,23 @@ impl Drop for OsIpcReceiverSet {
 
 impl OsIpcReceiverSet {
     pub fn new() -> Result<OsIpcReceiverSet,UnixError> {
+        let fnv = BuildHasherDefault::<FnvHasher>::default();
         Ok(OsIpcReceiverSet {
             pollfds: Vec::new(),
+            fdids: HashMap::with_hasher(fnv)
         })
     }
 
-    pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<i64,UnixError> {
+    pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<Uuid,UnixError> {
         let fd = receiver.consume_fd();
+        let uuid = Uuid::new_v4();
         self.pollfds.push(pollfd {
             fd: fd,
             events: POLLIN,
             revents: 0,
         });
-        Ok(fd as i64)
+        self.fdids.insert(fd, uuid);
+        Ok(uuid)
     }
 
     pub fn select(&mut self) -> Result<Vec<OsIpcSelectionResult>,UnixError> {
@@ -432,7 +440,7 @@ impl OsIpcReceiverSet {
                 match recv(pollfd.fd, BlockingMode::Blocking) {
                     Ok((data, channels, shared_memory_regions)) => {
                         selection_results.push(OsIpcSelectionResult::DataReceived(
-                                pollfd.fd as i64,
+                                *self.fdids.get(&pollfd.fd).unwrap(),
                                 data,
                                 channels,
                                 shared_memory_regions));
@@ -440,7 +448,7 @@ impl OsIpcReceiverSet {
                     Err(err) if err.channel_is_closed() => {
                         hangups.insert(pollfd.fd);
                         selection_results.push(OsIpcSelectionResult::ChannelClosed(
-                                    pollfd.fd as i64))
+                                    *self.fdids.get(&pollfd.fd).unwrap()))
                     }
                     Err(err) => return Err(err),
                 }
@@ -449,6 +457,12 @@ impl OsIpcReceiverSet {
         }
 
         if !hangups.is_empty() {
+            for fd in hangups.iter() {
+                self.fdids.remove(fd);
+                unsafe {
+                    libc::close(*fd);
+                }
+            }
             self.pollfds.retain(|pollfd| !hangups.contains(&pollfd.fd));
         }
 
@@ -457,12 +471,12 @@ impl OsIpcReceiverSet {
 }
 
 pub enum OsIpcSelectionResult {
-    DataReceived(i64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>),
-    ChannelClosed(i64),
+    DataReceived(Uuid, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>),
+    ChannelClosed(Uuid),
 }
 
 impl OsIpcSelectionResult {
-    pub fn unwrap(self) -> (i64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>) {
+    pub fn unwrap(self) -> (Uuid, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>) {
         match self {
             OsIpcSelectionResult::DataReceived(id, data, channels, shared_memory_regions) => {
                 (id, data, channels, shared_memory_regions)

@@ -13,17 +13,21 @@ use self::mach_sys::{mach_msg_timeout_t, mach_port_limits_t, mach_port_msgcount_
 use self::mach_sys::{mach_port_right_t, mach_port_t, mach_task_self_, vm_inherit_t};
 
 use bincode::serde::DeserializeError;
+use fnv::FnvHasher;
 use libc::{self, c_char, c_uint, c_void, size_t};
 use rand::{self, Rng};
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt::{self, Debug, Formatter};
+use std::hash::BuildHasherDefault;
 use std::io::{Error, ErrorKind};
 use std::mem;
 use std::ops::Deref;
 use std::ptr;
 use std::slice;
 use std::usize;
+use uuid::Uuid;
 
 mod mach_sys;
 
@@ -284,10 +288,10 @@ impl OsIpcReceiver {
                                          MachError> {
         select(self.port.get(), blocking_mode).and_then(|result| {
             match result {
-                OsIpcSelectionResult::DataReceived(_, data, channels, shared_memory_regions) => {
+                SelectResult::DataReceived(_, data, channels, shared_memory_regions) => {
                     Ok((data, channels, shared_memory_regions))
                 }
-                OsIpcSelectionResult::ChannelClosed(_) => Err(MachError(MACH_NOTIFY_NO_SENDERS)),
+                SelectResult::ChannelClosed(_) => Err(MachError(MACH_NOTIFY_NO_SENDERS)),
             }
         })
     }
@@ -490,10 +494,12 @@ impl OsOpaqueIpcChannel {
 
 pub struct OsIpcReceiverSet {
     port: Cell<mach_port_t>,
+    portids: HashMap<i64, Uuid, BuildHasherDefault<FnvHasher>>
 }
 
 impl OsIpcReceiverSet {
     pub fn new() -> Result<OsIpcReceiverSet,MachError> {
+        let fnv = BuildHasherDefault::<FnvHasher>::default();
         let mut port: mach_port_t = 0;
         let os_result = unsafe {
             mach_sys::mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &mut port)
@@ -501,27 +507,41 @@ impl OsIpcReceiverSet {
         if os_result == KERN_SUCCESS {
             Ok(OsIpcReceiverSet {
                 port: Cell::new(port),
+                portids: HashMap::with_hasher(fnv)
             })
         } else {
             Err(MachError(os_result))
         }
     }
 
-    pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<i64,MachError> {
+    pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<Uuid,MachError> {
         let receiver_port = receiver.consume_port();
+        let uuid = Uuid::new_v4();
         let os_result = unsafe {
             mach_sys::mach_port_move_member(mach_task_self(), receiver_port, self.port.get())
         };
         if os_result == KERN_SUCCESS {
-            Ok(receiver_port as i64)
+            self.portids.insert(receiver_port as i64, uuid);
+            Ok(uuid)
         } else {
             Err(MachError(os_result))
         }
     }
 
     pub fn select(&mut self) -> Result<Vec<OsIpcSelectionResult>,MachError> {
-        match select(self.port.get(), BlockingMode::Blocking).map(|result| vec![result]) {
-            Ok(results) => Ok(results),
+        match select(self.port.get(), BlockingMode::Blocking) {
+            Ok(results) => {
+                let result = match results {
+                    SelectResult::ChannelClosed(local_port) => {
+                        OsIpcSelectionResult::ChannelClosed(self.portids.remove(&local_port).unwrap())
+                    },
+                    SelectResult::DataReceived(local_port, data, channels, shared_memory_regions) => {
+                        let uuid = self.portids.get(&local_port).unwrap();
+                        OsIpcSelectionResult::DataReceived(*uuid, data, channels, shared_memory_regions)
+                    }
+                };
+                Ok(vec![result])
+            }
             Err(error) => {
                 Err(error)
             }
@@ -529,13 +549,18 @@ impl OsIpcReceiverSet {
     }
 }
 
-pub enum OsIpcSelectionResult {
+enum SelectResult {
     DataReceived(i64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>),
     ChannelClosed(i64),
 }
 
+pub enum OsIpcSelectionResult {
+    DataReceived(Uuid, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>),
+    ChannelClosed(Uuid),
+}
+
 impl OsIpcSelectionResult {
-    pub fn unwrap(self) -> (i64, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>) {
+    pub fn unwrap(self) -> (Uuid, Vec<u8>, Vec<OsOpaqueIpcChannel>, Vec<OsIpcSharedMemory>) {
         match self {
             OsIpcSelectionResult::DataReceived(id, data, channels, shared_memory_regions) => {
                 (id, data, channels, shared_memory_regions)
@@ -554,7 +579,7 @@ enum BlockingMode {
 }
 
 fn select(port: mach_port_t, blocking_mode: BlockingMode)
-          -> Result<OsIpcSelectionResult,MachError> {
+          -> Result<SelectResult,MachError> {
     debug_assert!(port != MACH_PORT_NULL);
     unsafe {
         let mut buffer = [0; SMALL_MESSAGE_SIZE];
@@ -605,7 +630,7 @@ fn select(port: mach_port_t, blocking_mode: BlockingMode)
 
         let local_port = (*message).header.msgh_local_port;
         if (*message).header.msgh_id == MACH_NOTIFY_NO_SENDERS {
-            return Ok(OsIpcSelectionResult::ChannelClosed(local_port as i64))
+            return Ok(SelectResult::ChannelClosed(local_port as i64))
         }
 
         let (mut ports, mut shared_memory_regions) = (Vec::new(), Vec::new());
@@ -639,10 +664,10 @@ fn select(port: mach_port_t, blocking_mode: BlockingMode)
             libc::free(allocated_buffer)
         }
 
-        Ok(OsIpcSelectionResult::DataReceived(local_port as i64,
-                                             payload,
-                                             ports,
-                                             shared_memory_regions))
+        Ok(SelectResult::DataReceived(local_port as i64,
+                                      payload,
+                                      ports,
+                                      shared_memory_regions))
     }
 }
 

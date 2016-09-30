@@ -20,6 +20,7 @@ use std::io::{Error, ErrorKind};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
+use uuid::Uuid;
 
 thread_local! {
     static OS_IPC_CHANNELS_FOR_DESERIALIZATION: RefCell<Vec<OsOpaqueIpcChannel>> =
@@ -211,12 +212,12 @@ impl IpcReceiverSet {
         })
     }
 
-    pub fn add<T>(&mut self, receiver: IpcReceiver<T>) -> Result<i64,Error>
+    pub fn add<T>(&mut self, receiver: IpcReceiver<T>) -> Result<Uuid,Error>
                   where T: Deserialize + Serialize {
         Ok(try!(self.os_receiver_set.add(receiver.os_receiver)))
     }
 
-    pub fn add_opaque(&mut self, receiver: OpaqueIpcReceiver) -> Result<i64,Error> {
+    pub fn add_opaque(&mut self, receiver: OpaqueIpcReceiver) -> Result<Uuid,Error> {
         Ok(try!(self.os_receiver_set.add(receiver.os_receiver)))
     }
 
@@ -307,12 +308,12 @@ impl IpcSharedMemory {
 }
 
 pub enum IpcSelectionResult {
-    MessageReceived(i64, OpaqueIpcMessage),
-    ChannelClosed(i64),
+    MessageReceived(Uuid, OpaqueIpcMessage),
+    ChannelClosed(Uuid),
 }
 
 impl IpcSelectionResult {
-    pub fn unwrap(self) -> (i64, OpaqueIpcMessage) {
+    pub fn unwrap(self) -> (Uuid, OpaqueIpcMessage) {
         match self {
             IpcSelectionResult::MessageReceived(id, message) => (id, message),
             IpcSelectionResult::ChannelClosed(id) => {

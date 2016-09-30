@@ -16,6 +16,8 @@ use ipc::{self, IpcReceiver, IpcReceiverSet, IpcSelectionResult, IpcSender, Opaq
 use ipc::{OpaqueIpcReceiver};
 use serde::{Deserialize, Serialize};
 
+use uuid::Uuid;
+
 lazy_static! {
     pub static ref ROUTER: RouterProxy = RouterProxy::new();
 }
@@ -77,9 +79,9 @@ struct RouterProxyComm {
 
 struct Router {
     msg_receiver: Receiver<RouterMsg>,
-    msg_wakeup_id: i64,
+    msg_wakeup_id: Uuid,
     ipc_receiver_set: IpcReceiverSet,
-    handlers: HashMap<i64,RouterHandler>,
+    handlers: HashMap<Uuid,RouterHandler>,
 }
 
 impl Router {

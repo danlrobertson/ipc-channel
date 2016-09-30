@@ -17,8 +17,9 @@ extern crate bincode;
 extern crate libc;
 extern crate rand;
 extern crate serde;
-#[cfg(any(feature = "force-inprocess", target_os = "windows", target_os = "android"))]
 extern crate uuid;
+#[cfg(not(any(feature = "force-inprocess", target_os = "windows", target_os = "android")))]
+extern crate fnv;
 
 pub mod ipc;
 pub mod platform;
