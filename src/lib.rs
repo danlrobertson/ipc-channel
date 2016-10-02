@@ -20,6 +20,7 @@ extern crate serde;
 extern crate uuid;
 #[cfg(not(any(feature = "force-inprocess", target_os = "windows", target_os = "android")))]
 extern crate fnv;
+extern crate paper_io;
 
 pub mod ipc;
 pub mod platform;

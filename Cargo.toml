@@ -17,6 +17,7 @@ rand = "0.3"
 serde = "0.8"
 uuid = {version = "0.3", features = ["v4"]}
 fnv = "1.0.3"
+paper-io = {git="https://github.com/danlrobertson/paper-io"}
 
 [dev-dependencies]
 crossbeam = "0.2"

@@ -9,9 +9,9 @@
 
 use bincode::serde::DeserializeError;
 use fnv::FnvHasher;
-use libc::{self, MAP_FAILED, MAP_SHARED, POLLIN, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
+use libc::{self, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
 use libc::{SO_LINGER, S_IFMT, S_IFSOCK, c_char, c_int, c_short, c_ushort, c_void, getsockopt};
-use libc::{iovec, mkstemp, mode_t, msghdr, nfds_t, off_t, poll, pollfd, recvmsg, sendmsg};
+use libc::{iovec, mkstemp, mode_t, msghdr, off_t, recvmsg, sendmsg};
 use libc::{setsockopt, size_t, sockaddr, sockaddr_un, socketpair, socklen_t};
 use std::cmp;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +26,7 @@ use std::slice;
 use std::sync::Arc;
 use std::thread;
 use uuid::Uuid;
+use paper_io::{Selector, Events, Event};
 
 const MAX_FDS_IN_CMSG: u32 = 64;
 
@@ -389,26 +390,15 @@ impl OsIpcChannel {
 }
 
 pub struct OsIpcReceiverSet {
-    pollfds: Vec<pollfd>,
+    selector: Selector,
     fdids: HashMap<c_int, Uuid, BuildHasherDefault<FnvHasher>>,
-}
-
-impl Drop for OsIpcReceiverSet {
-    fn drop(&mut self) {
-        unsafe {
-            for pollfd in self.pollfds.iter() {
-                let result = libc::close(pollfd.fd);
-                assert!(thread::panicking() || result == 0);
-            }
-        }
-    }
 }
 
 impl OsIpcReceiverSet {
     pub fn new() -> Result<OsIpcReceiverSet,UnixError> {
         let fnv = BuildHasherDefault::<FnvHasher>::default();
         Ok(OsIpcReceiverSet {
-            pollfds: Vec::new(),
+            selector: Selector::new(10, None),
             fdids: HashMap::with_hasher(fnv)
         })
     }
@@ -416,57 +406,49 @@ impl OsIpcReceiverSet {
     pub fn add(&mut self, receiver: OsIpcReceiver) -> Result<Uuid,UnixError> {
         let fd = receiver.consume_fd();
         let uuid = Uuid::new_v4();
-        self.pollfds.push(pollfd {
-            fd: fd,
-            events: POLLIN,
-            revents: 0,
-        });
+        self.selector.add(fd, Events::new(Event::Read));
         self.fdids.insert(fd, uuid);
         Ok(uuid)
     }
 
     pub fn select(&mut self) -> Result<Vec<OsIpcSelectionResult>,UnixError> {
         let mut selection_results = Vec::new();
-        let result = unsafe {
-            poll(self.pollfds.as_mut_ptr(), self.pollfds.len() as nfds_t, -1)
-        };
-        if result <= 0 {
-            return Err(UnixError::last())
-        }
 
-        let mut hangups = HashSet::new();
-        for pollfd in self.pollfds.iter_mut() {
-            if (pollfd.revents & POLLIN) != 0 {
-                match recv(pollfd.fd, BlockingMode::Blocking) {
-                    Ok((data, channels, shared_memory_regions)) => {
-                        selection_results.push(OsIpcSelectionResult::DataReceived(
-                                *self.fdids.get(&pollfd.fd).unwrap(),
-                                data,
-                                channels,
-                                shared_memory_regions));
+        match self.selector.select() {
+            Ok(res) => {
+                let mut hangups = HashSet::new();
+                for fd in res {
+                    match recv(fd, BlockingMode::Blocking) {
+                        Ok((data, channels, shared_memory_regions)) => {
+                            selection_results.push(OsIpcSelectionResult::DataReceived(
+                                    *self.fdids.get(&fd).unwrap(),
+                                    data,
+                                    channels,
+                                    shared_memory_regions));
+                        }
+                        Err(err) if err.channel_is_closed() => {
+                            hangups.insert(fd);
+                            selection_results.push(OsIpcSelectionResult::ChannelClosed(
+                                        *self.fdids.get(&fd).unwrap()))
+                        }
+                        Err(err) => return Err(err),
                     }
-                    Err(err) if err.channel_is_closed() => {
-                        hangups.insert(pollfd.fd);
-                        selection_results.push(OsIpcSelectionResult::ChannelClosed(
-                                    *self.fdids.get(&pollfd.fd).unwrap()))
-                    }
-                    Err(err) => return Err(err),
                 }
-                pollfd.revents = pollfd.revents & !POLLIN
+                if !hangups.is_empty() {
+                    for fd in hangups.iter() {
+                        self.selector.rm(*fd);
+                        self.fdids.remove(fd);
+                        unsafe {
+                            libc::close(*fd);
+                        }
+                    }
+                }
+                Ok(selection_results)
+            },
+            Err(_) => {
+                Err(UnixError::last())
             }
         }
-
-        if !hangups.is_empty() {
-            for fd in hangups.iter() {
-                self.fdids.remove(fd);
-                unsafe {
-                    libc::close(*fd);
-                }
-            }
-            self.pollfds.retain(|pollfd| !hangups.contains(&pollfd.fd));
-        }
-
-        Ok(selection_results)
     }
 }
 
