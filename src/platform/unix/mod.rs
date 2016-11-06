@@ -476,6 +476,12 @@ impl OsIpcReceiverSet {
         }
 
         if !hangups.is_empty() {
+            for fd in hangups.iter() {
+                self.fdids.remove(fd);
+                unsafe {
+                    libc::close(*fd);
+                }
+            }
             self.pollfds.retain(|pollfd| !hangups.contains(&pollfd.fd));
         }
 
