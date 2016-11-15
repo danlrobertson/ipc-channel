@@ -1,12 +1,12 @@
 #![feature(test)]
 
-extern crate crossbeam;
 extern crate ipc_channel;
 extern crate test;
 
 use ipc_channel::platform;
 
-use std::sync::{mpsc, Mutex};
+use std::sync::{Arc, mpsc, Mutex};
+use std::thread;
 
 /// Allows doing multiple inner iterations per bench.iter() run.
 ///
@@ -29,39 +29,42 @@ fn create_channel(b: &mut test::Bencher) {
 
 fn bench_size(b: &mut test::Bencher, size: usize) {
     let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let data = Arc::new(data);
+
     let (tx, rx) = platform::channel().unwrap();
 
     let (wait_tx, wait_rx) = mpsc::channel();
-    let wait_rx = Mutex::new(wait_rx);
+    let wait_rx = Arc::new(Mutex::new(wait_rx));
 
     if size > platform::OsIpcSender::get_max_fragment_size() {
         b.iter(|| {
-            crossbeam::scope(|scope| {
-                scope.spawn(|| {
-                    let wait_rx = wait_rx.lock().unwrap();
-                    for _ in 0..ITERATIONS {
-                        tx.send(&data, vec![], vec![]).unwrap();
-                        if ITERATIONS > 1 {
-                            // Prevent beginning of the next send
-                            // from overlapping with receive of last fragment,
-                            // as otherwise results of runs with a large tail fragment
-                            // are significantly skewed.
-                            wait_rx.recv().unwrap();
-                        }
-                    }
-                });
+            let data = data.clone();
+            let tx = tx.clone();
+            let wait_rx = wait_rx.clone();
+            thread::spawn(move || {
+                let wait_rx = wait_rx.lock().unwrap();
                 for _ in 0..ITERATIONS {
-                    rx.recv().unwrap();
+                    tx.send(&data, vec![], vec![]).unwrap();
                     if ITERATIONS > 1 {
-                        wait_tx.send(()).unwrap();
+                        // Prevent beginning of the next send
+                        // from overlapping with receive of last fragment,
+                        // as otherwise results of runs with a large tail fragment
+                        // are significantly skewed.
+                        wait_rx.recv().unwrap();
                     }
                 }
-                // For reasons mysterious to me,
-                // not returning a value *from every branch*
-                // adds some 100 ns or so of overhead to all results --
-                // which is quite significant for very short tests...
-                0
-            })
+            });
+            for _ in 0..ITERATIONS {
+                rx.recv().unwrap();
+                if ITERATIONS > 1 {
+                    wait_tx.send(()).unwrap();
+                }
+            }
+            // For reasons mysterious to me,
+            // not returning a value *from every branch*
+            // adds some 100 ns or so of overhead to all results --
+            // which is quite significant for very short tests...
+            0
         });
     } else {
         b.iter(|| {

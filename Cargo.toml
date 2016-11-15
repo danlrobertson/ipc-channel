@@ -21,6 +21,3 @@ fnv = "1.0.3"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 mio = "0.6.1"
-
-[dev-dependencies]
-crossbeam = "0.2"
