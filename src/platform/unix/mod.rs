@@ -11,7 +11,7 @@ use fnv::FnvHasher;
 use bincode::serde::DeserializeError;
 use libc::{self, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, SOCK_SEQPACKET, SOL_SOCKET};
 use libc::{SO_LINGER, S_IFMT, S_IFSOCK, c_char, c_int, c_void, getsockopt};
-use libc::{iovec, mkstemp, mode_t, msghdr, off_t, recvmsg, sendmsg};
+use libc::{iovec, mode_t, msghdr, off_t, recvmsg, sendmsg};
 use libc::{setsockopt, size_t, sockaddr, sockaddr_un, socketpair, socklen_t, sa_family_t};
 use std::cell::Cell;
 use std::cmp;
@@ -26,6 +26,8 @@ use std::ops::Deref;
 use std::ptr;
 use std::slice;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::time::UNIX_EPOCH;
 use std::thread;
 use mio::unix::EventedFd;
 use mio::{Poll, Token, Events, Ready, PollOpt};
@@ -38,12 +40,6 @@ const SCM_RIGHTS: c_int = 0x01;
 // is not the size we are actually allowed to use...
 // Empirically, we have to deduct 32 bytes from that.
 const RESERVED_SIZE: usize = 32;
-
-#[cfg(target_os="android")]
-const TEMP_FILE_TEMPLATE: &'static str = "/sdcard/servo/ipc-channel-shared-memory.XXXXXX";
-
-#[cfg(not(target_os="android"))]
-const TEMP_FILE_TEMPLATE: &'static str = "/tmp/ipc-channel-shared-memory.XXXXXX";
 
 #[cfg(target_os = "linux")]
 type IovLen = usize;
@@ -69,6 +65,8 @@ lazy_static! {
         tx.get_system_sendbuf_size().expect("Failed to obtain maximum send size for socket")
     };
 }
+
+static GLOBAL_SHM_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub fn channel() -> Result<(OsIpcSender, OsIpcReceiver),UnixError> {
     let mut results = [0, 0];
@@ -655,16 +653,14 @@ struct BackingStore {
 
 impl BackingStore {
     pub fn new(length: usize) -> BackingStore {
-        unsafe {
-            let string = CString::new(TEMP_FILE_TEMPLATE).unwrap();
-            let string_buffer = strdup(string.as_ptr());
-            let fd = mkstemp(string_buffer);
-            assert!(fd >= 0);
-            assert!(maybe_unlink(string_buffer) == 0);
-            libc::free(string_buffer as *mut c_void);
-            assert!(libc::ftruncate(fd, length as off_t) == 0);
-            Self::from_fd(fd)
-        }
+        let count = GLOBAL_SHM_COUNT.fetch_add(1, Ordering::SeqCst);
+        let timestamp = UNIX_EPOCH.elapsed().unwrap();
+        let pid = unsafe { libc::getpid() };
+        let name = CString::new(format!("/ipc-channel-shared-memory.{}.{}.{}",
+                                        count, pid,
+                                        timestamp.as_secs())).unwrap();
+        let fd = create_shmem(name, length);
+        Self::from_fd(fd)
     }
 
     pub fn from_fd(fd: c_int) -> BackingStore {
@@ -932,18 +928,16 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
     Ok((main_data_buffer, channels, shared_memory_regions))
 }
 
-#[cfg(target_os="android")]
-fn maybe_unlink(_: *const c_char) -> c_int {
-    // Calling `unlink` on a file stored on an sdcard immediately deletes it.
-    // FIXME: use a better temporary directory than the sdcard via the Java APIs
-    // and threading that value into Servo.
-    // https://code.google.com/p/android/issues/detail?id=19017
-    0
-}
-
-#[cfg(not(target_os="android"))]
-unsafe fn maybe_unlink(c: *const c_char) -> c_int {
-    libc::unlink(c)
+fn create_shmem(name: CString, length: usize) -> c_int {
+    unsafe {
+        let fd = libc::shm_open(name.as_ptr(),
+                                libc::O_CREAT | libc::O_RDWR | libc::O_EXCL,
+                                0o000);
+        assert!(fd >= 0);
+        assert!(libc::shm_unlink(name.as_ptr()) == 0);
+        assert!(libc::ftruncate(fd, length as off_t) == 0);
+        fd
+    }
 }
 
 struct UnixCmsg {
@@ -1050,7 +1044,6 @@ fn S_ISSOCK(mode: mode_t) -> bool {
 
 extern {
     fn mktemp(template: *mut c_char) -> *mut c_char;
-    fn strdup(string: *const c_char) -> *mut c_char;
 }
 
 #[repr(C)]
