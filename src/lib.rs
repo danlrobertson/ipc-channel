@@ -27,6 +27,10 @@ extern crate mio;
                                                 target_os = "freebsd")))]
 extern crate fnv;
 
+#[cfg(all(not(feature = "force-inprocess"), target_os = "linux"))]
+#[macro_use]
+extern crate syscall;
+
 pub mod ipc;
 pub mod platform;
 pub mod router;
