@@ -931,10 +931,19 @@ fn create_string() -> CString {
                            pid, epoc.as_secs(), epoc.subsec_nanos())).unwrap()
 }
 
+#[cfg(any(feature="force-posix-shm", not(target_os="linux")))]
 unsafe fn create_shmem(name: *const c_char, length: usize) -> c_int {
     let fd = libc::shm_open(name, libc::O_CREAT | libc::O_RDWR | libc::O_EXCL, 0o600);
     assert!(fd >= 0);
     assert!(libc::shm_unlink(name) == 0);
+    assert!(libc::ftruncate(fd, length as off_t) == 0);
+    fd
+}
+
+#[cfg(all(not(feature="force-posix-shm"), target_os="linux"))]
+unsafe fn create_shmem(name: *const c_char, length: usize) -> c_int {
+    let fd = memfd_create(name, 0);
+    assert!(fd >= 0);
     assert!(libc::ftruncate(fd, length as off_t) == 0);
     fd
 }
@@ -1014,6 +1023,11 @@ fn is_socket(fd: c_int) -> bool {
 }
 
 // FFI stuff follows:
+
+#[cfg(all(not(feature="force-posix-shm"), target_os="linux"))]
+unsafe fn memfd_create(name: *const c_char, flags: usize) -> c_int {
+    syscall!(MEMFD_CREATE, name, flags) as c_int
+}
 
 #[allow(non_snake_case)]
 fn CMSG_LEN(length: size_t) -> size_t {
