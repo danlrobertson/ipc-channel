@@ -10,6 +10,7 @@ os:
 env:
   - FEATURES="unstable"
   - FEATURES="unstable force-inprocess"
+  - FEATURES="unstable force-posix-shm"
 
 notifications:
   webhooks: http://build.servo.org:54856/travis

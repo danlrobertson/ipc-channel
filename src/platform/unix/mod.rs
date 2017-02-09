@@ -928,6 +928,7 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
     Ok((main_data_buffer, channels, shared_memory_regions))
 }
 
+#[cfg(any(feature="force-posix-shm", not(target_os="linux")))]
 fn create_shmem(name: CString, length: usize) -> c_int {
     unsafe {
         let fd = libc::shm_open(name.as_ptr(),
@@ -935,6 +936,16 @@ fn create_shmem(name: CString, length: usize) -> c_int {
                                 0o000);
         assert!(fd >= 0);
         assert!(libc::shm_unlink(name.as_ptr()) == 0);
+        assert!(libc::ftruncate(fd, length as off_t) == 0);
+        fd
+    }
+}
+
+#[cfg(all(not(feature="force-posix-shm"), target_os="linux"))]
+fn create_shmem(name: CString, length: usize) -> c_int {
+    unsafe {
+        let fd = memfd_create(name.as_ptr(), 0);
+        assert!(fd >= 0);
         assert!(libc::ftruncate(fd, length as off_t) == 0);
         fd
     }
@@ -1015,6 +1026,11 @@ fn is_socket(fd: c_int) -> bool {
 }
 
 // FFI stuff follows:
+
+#[cfg(all(not(feature="force-posix-shm"), target_os="linux"))]
+unsafe fn memfd_create(name: *const c_char, flags: usize) -> c_int {
+    syscall!(MEMFD_CREATE, name, flags) as c_int
+}
 
 #[allow(non_snake_case)]
 fn CMSG_LEN(length: size_t) -> size_t {
