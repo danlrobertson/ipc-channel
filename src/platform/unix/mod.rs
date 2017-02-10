@@ -931,7 +931,7 @@ fn create_string() -> CString {
                            pid, epoc.as_secs(), epoc.subsec_nanos())).unwrap()
 }
 
-#[cfg(any(feature="force-posix-shm", not(target_os="linux")))]
+#[cfg(any(feature="force-posix-shm", not(any(target_os="linux", target_os="android"))))]
 unsafe fn create_shmem(name: *const c_char, length: usize) -> c_int {
     let fd = libc::shm_open(name, libc::O_CREAT | libc::O_RDWR | libc::O_EXCL, 0o600);
     assert!(fd >= 0);
@@ -945,6 +945,13 @@ unsafe fn create_shmem(name: *const c_char, length: usize) -> c_int {
     let fd = memfd_create(name, 0);
     assert!(fd >= 0);
     assert!(libc::ftruncate(fd, length as off_t) == 0);
+    fd
+}
+
+#[cfg(all(not(feature="force-posix-shm"), target_os="android"))]
+unsafe fn create_shmem(name: *const c_char, length: usize) -> c_int {
+    let fd = ashmem_create_region(name, length);
+    assert!(fd >= 0);
     fd
 }
 
