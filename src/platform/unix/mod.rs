@@ -928,7 +928,7 @@ fn recv(fd: c_int, blocking_mode: BlockingMode)
     Ok((main_data_buffer, channels, shared_memory_regions))
 }
 
-#[cfg(any(feature="force-posix-shm", not(target_os="linux")))]
+#[cfg(any(feature="force-posix-shm", not(any(target_os="linux", target_os="android"))))]
 fn create_shmem(name: CString, length: usize) -> c_int {
     unsafe {
         let fd = libc::shm_open(name.as_ptr(),
@@ -947,6 +947,15 @@ fn create_shmem(name: CString, length: usize) -> c_int {
         let fd = memfd_create(name.as_ptr(), 0);
         assert!(fd >= 0);
         assert!(libc::ftruncate(fd, length as off_t) == 0);
+        fd
+    }
+}
+
+#[cfg(all(not(feature="force-posix-shm"), target_os="android"))]
+fn create_shmem(name: CString, length: usize) -> c_int {
+    unsafe {
+        let fd = ashmem_create_region(name, length);
+        assert!(fd >= 0);
         fd
     }
 }
