@@ -3,14 +3,12 @@ sudo: false
 rust:
   - nightly
 
-os:
-  - linux
-  - osx
-
-env:
-  - FEATURES="unstable"
-  - FEATURES="unstable force-inprocess"
-  - FEATURES="unstable force-posix-shm"
+matrix:
+    include:
+        - os: linux
+          env: FEATURES="unstable"; FEATURES="unstable force-inprocess"; FEATURES="unstable force-posix-shm"
+        - os: osx
+          env: FEATURES="unstable"; FEATURES="unstable force-inprocess"
 
 notifications:
   webhooks: http://build.servo.org:54856/travis
