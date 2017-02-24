@@ -112,6 +112,48 @@ pub fn bytes_channel() -> Result<(IpcBytesSender, IpcBytesReceiver),Error> {
     Ok((ipc_bytes_sender, ipc_bytes_receiver))
 }
 
+/// A wrapper for OS specific `send`/`recv`
+///
+/// # Examples
+/// ```
+/// use ipc_channel::ipc;
+///
+/// let q = "Answer to the ultimate question of life, the universe, and everything";
+/// let answer = "42";
+///
+/// // Create a tuple cont
+/// let (tx, rx) = ipc::channel().unwrap();
+///
+/// // Send data
+/// tx.send(q.to_owned()).unwrap();
+///
+/// // Non-blocking receive
+/// loop {
+///     match rx.try_recv() {
+///         Ok(res) => {
+///             assert_eq!(res, q);
+///             break;
+///         },
+///         Err(_) => {
+///             // Do something else useful while we wait
+///         }
+///     }
+/// }
+///
+/// // Send data
+/// tx.send(answer.to_owned()).unwrap();
+///
+/// // Blocking receive
+/// let response = rx.recv().unwrap();
+/// assert_eq!(response, answer);
+/// ```
+///
+/// # Implementation details
+///
+/// Each [IpcReceiver] is backed by the OS specific implementations of [OsIpcReceiver].
+///
+/// [IpcReceiver]: struct.IpcReceiver.html
+/// [OsIpcReceiver]: /platform/struct.OsIpcReceiver.html
 #[derive(Debug)]
 pub struct IpcReceiver<T> where T: for<'de> Deserialize<'de> + Serialize {
     os_receiver: OsIpcReceiver,
@@ -119,6 +161,7 @@ pub struct IpcReceiver<T> where T: for<'de> Deserialize<'de> + Serialize {
 }
 
 impl<T> IpcReceiver<T> where T: for<'de> Deserialize<'de> + Serialize {
+    /// Blocking receive
     pub fn recv(&self) -> Result<T, bincode::Error> {
         let (data, os_ipc_channels, os_ipc_shared_memory_regions) = try!(self.os_receiver.recv());
         OpaqueIpcMessage::new(data, os_ipc_channels, os_ipc_shared_memory_regions).to()
