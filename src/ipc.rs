@@ -41,6 +41,29 @@ thread_local! {
         RefCell::new(Vec::new())
 }
 
+/// Return a `Result` containing a tuple with a [IpcSender] and [IpcReceiver]
+///
+/// # Examples
+///
+/// ```
+/// use ipc_channel::ipc;
+///
+/// let payload = "Hello, World!".to_owned();
+///
+/// // Create a channel
+/// let (tx, rx) = ipc::channel().unwrap();
+///
+/// // Send data
+/// tx.send(payload.clone()).unwrap();
+///
+/// // Receive the data
+/// let response = rx.recv().unwrap();
+///
+/// assert_eq!(response, payload);
+/// ```
+///
+/// [IpcSender]: struct.IpcSender.html
+/// [IpcReceiver]: struct.IpcReceiver.html
 pub fn channel<T>() -> Result<(IpcSender<T>, IpcReceiver<T>),Error>
                   where T: for<'de> Deserialize<'de> + Serialize {
     let (os_sender, os_receiver) = try!(platform::channel());
@@ -55,6 +78,29 @@ pub fn channel<T>() -> Result<(IpcSender<T>, IpcReceiver<T>),Error>
     Ok((ipc_sender, ipc_receiver))
 }
 
+/// Returns a `Result` containing a tuple with a [IpcBytesSender] and [IpcBytesReceiver]
+///
+/// # Examples
+///
+/// ```
+/// use ipc_channel::ipc;
+///
+/// let payload = b"Tis but a scratch";
+///
+/// // Create a channel
+/// let (tx, rx) = ipc::bytes_channel().unwrap();
+///
+/// // Send data
+/// tx.send(payload).unwrap();
+///
+/// // Receive the data
+/// let response = rx.recv().unwrap();
+///
+/// assert_eq!(response, payload);
+/// ```
+///
+/// [IpcBytesReceiver]: struct.IpcBytesReceiver.html
+/// [IpcBytesSender]: struct.IpcBytesSender.html
 pub fn bytes_channel() -> Result<(IpcBytesSender, IpcBytesReceiver),Error> {
     let (os_sender, os_receiver) = try!(platform::channel());
     let ipc_bytes_receiver = IpcBytesReceiver {
