@@ -11,6 +11,31 @@
 			feature(mpsc_select))]
 #![cfg_attr(all(feature = "unstable", test), feature(specialization))]
 
+//! An implementation of the Rust channel API (a form of communicating sequential
+//! processes, CSP) over the native OS abstractions. Under the hood, this API uses
+//! Mach ports on Mac and file descriptor passing over Unix sockets on Linux. The
+//! serde library is used to serialize values for transport over the wire.
+//!
+//! For more detail, see [IpcReceiver].
+//!
+//! # Features
+//! ## `force-inprocess`
+//!
+//! Force the `inprocess` backend to be used instead of the OS specific backend.
+//!
+//! ## `memfd`
+//!
+//! Use [memfd_create] to back [OsIpcSharedMemory] on linux. [memfd_create] was 
+//! introduced in version 3.17. __WARNING:__ Enabling this feature with kernel
+//! version less than 3.17 will cause panics on any use of [IpcSharedMemory].
+//!
+//! ## `unstable`
+//!
+//! [IpcReceiver]: ipc/struct.IpcReceiver.html
+//! [IpcSharedMemory]: ipc/struct.IpcSharedMemory.html
+//! [OsIpcSharedMemory]: platform/struct.OsIpcSharedMemory.html
+//! [memfd_create]: http://man7.org/linux/man-pages/man2/memfd_create.2.html
+
 #[macro_use]
 extern crate lazy_static;
 
